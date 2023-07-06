@@ -3,8 +3,12 @@
 
 import json
 import traceback
+import pytz
 
-from odoo import http
+from odoo import http, _
+from werkzeug.exceptions import BadRequest
+from werkzeug.utils import dump_cookie
+from datetime import datetime
 
 
 class EdiPunchoutController(http.Controller):
@@ -24,13 +28,15 @@ class EdiPunchoutController(http.Controller):
             )
         )
         response = http.request.make_response(transaction.transaction_id)
-        response.set_cookie(
+        response.headers.add('Set-Cookie', dump_cookie(
             "edi_punchout_client_key_%s" % transaction.id,
             transaction.client_key,
-            max_age=3600,
+            expires=self._current_timestamp()+3600,
             httponly=True,
-            samesite=None,
-        )
+            secure=True,
+        ) + "; SameSite=None")
+        # werkzeug 0.14 does not support setting SameSite to 'None'
+        # https://github.com/pallets/werkzeug/issues/1549
         return response
 
     @http.route(
@@ -54,7 +60,8 @@ class EdiPunchoutController(http.Controller):
             == transaction.client_key
         ):
             http.request.uid = transaction.create_uid.id
-            transaction = transaction.with_user(transaction.create_uid)
+            http.request.env.company = transaction.account_id.company_id
+            transaction = transaction.with_user(transaction.create_uid).with_context(allowed_company_ids=http.request.env.company.ids)
             transaction.request = json.dumps(http.request.httprequest.form)
             account = transaction.account_id
             account.check_access_rights("read")
@@ -109,7 +116,21 @@ class EdiPunchoutController(http.Controller):
         return self._redirect_order(order)
 
     def _ids_return_hook(self, account, order=None):
-        order = account._handle_return(
-            http.request.httprequest.form["warenkorb"], order
+        shopping_cart = http.request.httprequest.form.get("warenkorb",
+            http.request.httprequest.form.get("Warenkorb")
         )
+        if shopping_cart is None:
+            raise BadRequest(_("The request form is missing the shopping cart key!"))
+
+        order = account._handle_return(shopping_cart, order)
         return self._redirect_order(order)
+
+    @staticmethod
+    def _current_timestamp():
+        user_tz = pytz.timezone(http.request.env.user.tz if http.request.env.user.tz else "utc")
+        return (
+            (pytz.utc.localize(datetime.now()))
+            .astimezone(user_tz)
+            .replace(tzinfo=None)
+            .timestamp()
+        )
