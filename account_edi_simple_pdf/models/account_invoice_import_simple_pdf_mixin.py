@@ -2,6 +2,7 @@
 # @author: Alexis de Lattre <alexis.delattre@akretion.com>
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
+import io
 import logging
 import shutil
 import subprocess
@@ -155,6 +156,7 @@ class AccountInvoiceImportSimplePdfMixin(models.AbstractModel):
 
     @api.model
     def simple_pdf_text_extraction(self, file_data, test_info):
+        file_data = self._simple_pdf_preprocess(file_data)
         fileobj = NamedTemporaryFile("wb", prefix="odoo-simple-pdf-", suffix=".pdf")
         fileobj.write(file_data)
         # Extract text from PDF
@@ -206,6 +208,37 @@ class AccountInvoiceImportSimplePdfMixin(models.AbstractModel):
         )
         fileobj.close()
         return res
+
+    def _simple_pdf_preprocess(self, file_data):
+        """
+        Preprocess PDF in some way. Currently calls ocrmypdf
+        """
+        return self._simple_pdf_preprocess_ocrmypdf(file_data)
+
+    def _simple_pdf_preprocess_ocrmypdf(self, file_data):
+        try:
+            from ocrmypdf.api import ocr
+            from ocrmypdf.exceptions import ExitCodeException, TaggedPDFError
+        except ImportError:
+            logger.debug("ocrmypdf library not available, not doing OCR")
+            return file_data
+        result = io.BytesIO()
+        try:
+            ocr(
+                io.BytesIO(file_data),
+                result,
+                progress_bar=False,
+                optimize=0,
+                deskew=True,
+            )
+        except TaggedPDFError:
+            logger.debug("PDF already contains text, skipping OCR")
+            return file_data
+        except ExitCodeException:
+            logger.exception("exception during OCR preprocessing step")
+            return file_data
+        result.seek(0)
+        return result.read()
 
     @api.model
     def _simple_pdf_keyword_fields(self):
